@@ -1,0 +1,40 @@
+SAMPLES, = glob_wildcards('Results/WFABC/{samples}_names.csv')
+
+rule all:
+    input:
+        expand ('Results/WFABC/Results/Neg_SD_Ne/{sample}_posterior_s.txt', sample=SAMPLES)
+        
+rule cat:
+     input:
+        data ='Results/WFABC/{sample}.txt',
+        header = 'Results/WFABC/{sample}_header.txt'
+     output: 
+        full_input = 'Results/WFABC/input_files/{sample}.txt',
+     shell:
+        """
+        cat {input.header} {input.data} > {output.full_input}
+        """
+rule selection:
+     input:'Results/WFABC/input_files/{sample}.txt',
+        
+     output:'Results/WFABC/input_files/{sample}_posterior_s.txt', 'Results/WFABC/input_files/{sample}_obs_stats.txt'
+          
+     shell:
+        """
+        WFABC_v1.1/binaries/Mac/wfabc_1 -nboots 0 {input}
+        WFABC_v1.1/binaries/Mac/wfabc_2 -ploidy 1 -fixed_N 44  -min_s -0.5 -max_s 0.5 -min_freq 0.02 {input} #58 for 8hr gen
+        """
+		
+rule organize:
+     input:
+        input_1 = 'Results/WFABC/input_files/{sample}_posterior_s.txt',
+        input_2 = 'Results/WFABC/input_files/{sample}_obs_stats.txt'
+     output:
+        output_1 = 'Results/WFABC/Results/Neg_SD_Ne/{sample}_posterior_s.txt', 
+        output_2 = 'Results/WFABC/Results/Neg_SD_Ne/{sample}_obs_stats.txt'
+          
+     shell:
+        """
+        mv {input.input_1} {output.output_1}
+        mv {input.input_2} {output.output_2}
+        """

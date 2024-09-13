@@ -1,0 +1,43 @@
+SAMPLES, = glob_wildcards('Results/WFABC/{samples}_names.csv')
+
+rule all:
+    input:
+          expand ("Results/WFABC/merged/{sample}_merged_s.csv", sample=SAMPLES),
+          "Results/WFABC/selection_coefficients.csv",
+         
+        
+rule merge_ne_runs_h3n2:
+     message:
+         """
+          =======================================================
+          merge selection estimates from different Nes 
+          =======================================================
+         """
+     input:
+        mean_Ne = 'Results/WFABC/Results/Mean_Ne/{sample}_posterior_s.txt',
+        minus_sd_Ne = 'Results/WFABC/Results/Neg_SD_Ne/{sample}_posterior_s.txt', 
+        plus_sd_Ne = 'Results/WFABC/Results/Plus_SD_Ne/{sample}_posterior_s.txt',
+        names = 'Results/WFABC/{sample}_names.csv'
+        
+     output:
+        "Results/WFABC/merged/{sample}_merged_s.csv"
+    	
+     script:
+        "wfabc_merge_Ne_runs.R"
+        
+rule concatenate_H3N2:
+     message:
+         """
+          =======================================================
+          concat samples 
+          =======================================================
+         """
+     input:
+          expand ("Results/WFABC/merged/{sample}_merged_s.csv", sample=SAMPLES)
+        
+     output:
+          "Results/WFABC/selection_coefficients.csv"
+     
+     shell:
+          "awk 'NR == 1 || FNR > 1'  {input}  >  {output}"
+
