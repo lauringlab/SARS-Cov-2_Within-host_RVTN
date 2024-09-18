@@ -29,11 +29,5 @@ filename2 <- sub(".merged.tsv", "", filename)
 filename_vec <- strsplit(filename2, split = "/")[[1]]
 
 variants_filtered <- dplyr::mutate (variants_filtered, sample = filename_vec[4])
-#variants_filtered <- rename (variants_filtered,  mutation = 25, sample = 26)
-
-#write.table (variants_filtered, snakemake@output[[1]], quote=F, row.names=F)
-
-# filter to 98%
-#variants_filtered <- filter (variants_filtered, ALT_FREQ_1 <= 0.98, ALT_FREQ_2 <= 0.98)
 
 write.table (variants_filtered, snakemake@output[[1]], quote=F, row.names=F)

@@ -1,0 +1,119 @@
+### Author: Emily Bendall
+### Purpose: Processes coverage data and copies and renames the consensus  from first 
+high quality sample per individual to be used as the within-host consensus .
+
+# ============================= Configure run options here =============================
+
+
+
+import pandas as pd
+import subprocess
+import numpy as np
+
+SAMPLES, = glob_wildcards('data/fastq_renamed/{samples}_A.1.fastq.gz')
+
+
+rule all:
+     input:
+          expand ('data/aligned_output/coverage/{sample}_1.coverage_name', sample=SAMPLES),
+          expand ('data/aligned_output/coverage/{sample}_2.coverage_name', sample=SAMPLES),
+          expand ('data/aligned_output/coverage/{sample}_1.avg', sample=SAMPLES),
+          expand ('data/aligned_output/coverage/{sample}_2.avg', sample=SAMPLES),
+          'AvgCoverage.all',
+          "Within_host_ref.csv",
+          "samples_pass_coverage.csv",
+          "data/within_host_consensus/Reference_processing.log",
+
+# ============================= Here are the pipeline rules =============================
+
+rule add_name_coverage_1:
+     message:
+        """
+        =======================================================
+        add in sample name to coverage file and get avg- Replicate 1 
+        =======================================================
+        """
+
+     input:
+          inputA = 'data/aligned_output/coverage/{sample}_1.coverage.csv'
+
+     output:
+          sample1 = 'data/aligned_output/coverage/{sample}_1.coverage_name',
+          average1 = 'data/aligned_output/coverage/{sample}_1.avg'
+
+     script:
+          'coverage.R' 
+
+rule add_name_coverage_2:
+     message:
+        """
+        =======================================================
+        add in sample name to coverage file and get avg- Replicate 2
+        =======================================================
+        """
+
+     input:
+          inputA = 'data/aligned_output/coverage/{sample}_2.coverage.csv'
+
+     output:
+          sample1 = 'data/aligned_output/coverage/{sample}_2.coverage_name',
+          average1 = 'data/aligned_output/coverage/{sample}_2.avg'
+
+     script:
+          'coverage.R'
+
+     
+rule collapse_files:
+     message:
+        """
+        =======================================================
+		combine coverage files
+        =======================================================
+        """
+
+     input:
+         A = expand ('data/aligned_output/coverage/{sample}_{rep}.coverage_name', sample=SAMPLES, rep=["1", "2"]),
+         B = expand ('data/aligned_output/coverage/{sample}_{rep}.avg', sample=SAMPLES, rep=["1", "2"])
+     output:
+          A = "Coverage.all",
+          B = "AvgCoverage.all"
+
+     shell:
+          """
+          awk 'NR == 1 || FNR > 1'  {input.A}  >  {output.A}
+          awk 'NR == 1 || FNR > 1'  {input.B} > {output.B}
+          """
+
+rule coverage_pass_list:
+    message:
+        """
+        =======================================================
+		get list of samples to use as wihtin-host consensus reference
+        =======================================================
+        """
+
+    input: "AvgCoverage.all"
+        
+    output: "Within_host_ref.csv", "samples_pass_coverage.csv"
+
+    script:'Coverage_processing.R'
+          
+
+
+rule within_host_consensus:
+     message:
+        """
+        =======================================================
+		cp reference files to new directory
+        =======================================================
+        """
+        
+     input:"Within_host_ref.csv"
+     params:
+        input_directory = "data/aligned_output/consensus/",
+        final_directory = "data/within_host_consensus/reference/"
+     output:"data/within_host_consensus/Reference_processing.log"
+     script: "Copy_consensus.py"
+	
+
+	

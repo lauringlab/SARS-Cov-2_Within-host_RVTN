@@ -1,0 +1,188 @@
+### Author: Emily Bendall
+### Purpose: Get consensus genomes from Illumina sequencing data.
+### This is designed for using the ARTIC primers for SARS-CoV-2 sequenced on Illumina.
+
+# ============================= Configure run options here =============================
+import pandas as pd
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+
+IDS, = glob_wildcards("data/fastq_renamed/{id}_A.1.fastq.gz") # Where the pipeline will grab all of the IDs to run. Important to have changed the filenames first.
+
+rule all:
+    input:
+        "all.consensus.fasta",
+        expand ("data/aligned_output/consensus/{id}.fa", id=IDS),
+        expand ("data/aligned_output/coverage/{id}_1.coverage.csv", id=IDS)
+
+rule parameters:
+    params:
+        bed_file = "ncov_references/V5.3.2/SARS-CoV-2.scheme.bed",
+        reference_fasta = "ncov_references/bwa_ref/nCov_WH1_ref.fasta", # fasta used for alignment
+        reference_index = "ncov_references/bwa_ref/WH1", # bwa index used for alignment. Should be a build of reference_fasta
+        min_qual_score = 0, # minimum quality score used in iVar consensus. Important that this is zero for calling indels.
+        consensus_threshold = 0, # frequency threshold value used in iVar consensus. See documentation.
+        min_depth = 10, # minimum depth used in iVar consensus
+        cutadapt_seq_fwd = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA", # sequence used for adapter trimming. This is NEBnext (same as TruSeq). Nextera adapter sequence, forward and reverse: CTGTCTCTTATACACATCT
+        cutadapt_seq_rev = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+
+setup = rules.parameters.params
+
+# ============================= Here are the pipeline rules =============================
+
+rule fastqc:
+    message:
+        """
+        =======================================================
+        Run FastQC
+        =======================================================
+        """
+    input:
+        reads_1_in = "data/fastq_renamed/{id}_A.1.fastq.gz",
+        reads_2_in = "data/fastq_renamed/{id}_A.2.fastq.gz",
+        reads_3_in = "data/fastq_renamed/{id}_B.1.fastq.gz",
+        reads_4_in = "data/fastq_renamed/{id}_B.2.fastq.gz"
+
+    output:
+        output1 ="data/aligned_output/fastqc/{id}_1.1_fastqc.zip",
+        output2="data/aligned_output/fastqc/{id}_1.2_fastqc.zip",
+        output3 ="data/aligned_output/fastqc/{id}_2.1_fastqc.zip",
+        output4="data/aligned_output/fastqc/{id}_2.2_fastqc.zip"
+    params:
+    	"data/aligned_output/fastqc"
+    run:
+        shell("fastqc -o {params} --noextract -f fastq {input.reads_1_in}")
+        shell("fastqc -o {params} --noextract -f fastq {input.reads_2_in}")
+        shell("fastqc -o {params} --noextract -f fastq {input.reads_3_in}")
+        shell("fastqc -o {params} --noextract -f fastq {input.reads_4_in}")
+
+rule bwa_align:
+    message:
+        """
+        =======================================================
+        Map with BWA and sort
+        =======================================================
+        """
+    input:
+        reads_1_in = "data/fastq_renamed/{id}_A.1.fastq.gz",
+        reads_2_in = "data/fastq_renamed/{id}_A.2.fastq.gz",
+        reads_3_in = "data/fastq_renamed/{id}_B.1.fastq.gz",
+        reads_4_in = "data/fastq_renamed/{id}_B.2.fastq.gz"
+    output:
+        bam1 = "data/aligned_output/align/{id}_1.sorted.bam",
+        bam2 = "data/aligned_output/align/{id}_2.sorted.bam"
+        
+    shell:
+        """
+        bwa mem {setup.reference_index} {input.reads_1_in} {input.reads_2_in} | samtools view -F 4 -Sb | samtools sort -o {output.bam1} && samtools index {output.bam1}
+        bwa mem {setup.reference_index} {input.reads_3_in} {input.reads_4_in} | samtools view -F 4 -Sb | samtools sort -o {output.bam2} && samtools index {output.bam2}
+		"""
+
+rule ivar_trim:
+    message:
+        """
+        =======================================================
+        Trim the ARTIC primers with iVar
+        =======================================================
+        """
+    input:
+        in1 = "data/aligned_output/align/{id}_1.sorted.bam",
+        in2 = "data/aligned_output/align/{id}_2.sorted.bam"
+    output:
+        out1 = "data/aligned_output/primertrim/{id}_1.sorted.primertrim.bam",
+        out2 = "data/aligned_output/primertrim/{id}_2.sorted.primertrim.bam"
+    shell:
+        """
+        ivar trim -i {input.in1} -b {setup.bed_file} -p {output.out1}
+        ivar trim -i {input.in2} -b {setup.bed_file} -p {output.out2}
+        """
+
+rule sort_bam:
+    message:
+        """
+        =======================================================
+        Sort the primer-trimmed file
+        =======================================================
+        """
+    input:
+        in1= "data/aligned_output/primertrim/{id}_1.sorted.primertrim.bam",
+        in2= "data/aligned_output/primertrim/{id}_2.sorted.primertrim.bam"
+
+    output:
+        bam1 = "data/aligned_output/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam",
+        bai1 = "data/aligned_output/primertrim_sorted/{id}_1.removed.primertrim.sorted.bai",
+        bam2 = "data/aligned_output/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam",
+        bai2 = "data/aligned_output/primertrim_sorted/{id}_2.removed.primertrim.sorted.bai"
+
+    shell:
+        """
+        PicardCommandLine SortSam SO=coordinate INPUT={input.in1} OUTPUT={output.bam1} VALIDATION_STRINGENCY=LENIENT CREATE_INDEX=true
+        PicardCommandLine SortSam SO=coordinate INPUT={input.in2} OUTPUT={output.bam2} VALIDATION_STRINGENCY=LENIENT CREATE_INDEX=true
+        """
+
+rule get_coverage:
+    message:
+        """
+        =======================================================
+        Get coverage with samtools
+        =======================================================
+        """
+    input:
+        in_1= "data/aligned_output/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam",
+        in_2= "data/aligned_output/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam"
+    output:
+        out_1="data/aligned_output/coverage/{id}_1.coverage.csv",
+        out_2="data/aligned_output/coverage/{id}_2.coverage.csv"
+    shell:
+        """
+        samtools depth -a -d 100000 {input.in_1} > {output.out_1}
+        samtools depth -a -d 100000 {input.in_2} > {output.out_2}
+        """
+        
+rule consensus_sequence:
+    message:
+        """
+        =======================================================
+        Get consensus Sequence with Xue Script
+        =======================================================
+        """
+    input:
+        inputA = 'data/aligned_output/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam',
+        inputB = 'data/aligned_output/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam'   
+    output:
+        summary = 'data/aligned_output/consensus/{id}.summary',
+        fa = 'data/aligned_output/consensus/{id}.fa',
+        merged = 'data/aligned_output/consensus/{id}_merged.bam'
+    
+    shell:
+        """
+        samtools merge  {output.merged} {input.inputA} {input.inputB} 
+        ./SummarizeBAM  -i <(samtools view {output.merged}) -f {setup.reference_fasta} -o {output.summary} -s {output.fa} -Q {setup.min_qual_score}
+         """
+
+rule combine_and_export:
+    message:
+        """
+        =======================================================
+        Combine into a single fasta 
+        =======================================================
+        """
+    input:
+        consensus_files = expand("data/aligned_output/consensus/{id}.fa", id = IDS),
+    output:
+        output_consensus = "all.consensus.fasta",
+        
+    run:
+        print (output.output_consensus)
+        all_fasta = list()
+        for file in input.consensus_files:
+             filename_only = file.split("/")[3]
+             id = filename_only.split(".")[0]
+             print (id)
+             for record in SeqIO.parse(file, "fasta"):
+                 record.id = id
+                 #print (record)
+                 all_fasta.append(record)
+        with open(output.output_consensus, 'w') as full_fasta:
+             SeqIO.write(all_fasta, full_fasta, "fasta")

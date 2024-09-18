@@ -39,3 +39,10 @@ bottom <-plot_grid (sample_per_person_plot, NULL, snv_rep_plot_inset, labels = c
  plot_grid (NULL, bottom, nrow=2, rel_heights = c (0.2,1))
  
  
+## correlation coefficient for low (0-5%) and high (>5%) frequency iSNVs between replicates
+
+snv_meta_low <- filter (snv_meta, avg_freq <= 0.05)
+cor(snv_meta_low$ALT_FREQ_1, snv_meta_low$ALT_FREQ_2) 
+
+snv_meta_high <- filter (snv_meta, avg_freq > 0.05)
+cor(snv_meta_high$ALT_FREQ_1, snv_meta_high$ALT_FREQ_2) 

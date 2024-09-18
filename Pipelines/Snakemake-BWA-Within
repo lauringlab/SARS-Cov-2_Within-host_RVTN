@@ -1,0 +1,355 @@
+### Author: Emily Bendall
+### Purpose: Aligns reads to within-host consensus and calls variants using ivar 
+### This is designed for using the ARTIC primers for SARS-CoV-2 sequenced on Illumina.
+
+# ============================= How to run this pipeline ==========================
+
+# 1. Modify the parameters below as needed ("rule parameters").
+# 2. Load modules: module load Bioinformatics ivar python2.7-anaconda/2019.03 samtools/1.9 fastqc picard-tools bwa bedtools2 R
+# 3. Copy fastq files to data/fastq.
+# 4. Rename raw fastq files: python ~/variant_pipeline_resources/change_miseq_names_sars2.py -s data/fastq -f data/fastq_renamed -run
+# 5. Unzip fastq files: gunzip -v data/fastq_renamed/*.gz
+# 6. Activate snakemake: conda activate snakemake
+# 7. Run job on Slurm: sbatch submit_snakemake.sbat -- Or run directly: snakemake -s Snakefile-BWA -p --latency-wait 30 --cores 2
+
+# ============================= Configure run options here =============================
+import pandas as pd
+#gets list of samples that pass coverage requirements for realignment and variant calling
+cov = pd.read_csv ("samples_pass_coverage.csv", header=0, names=["id", "rep_1", "rep_2", "Pass_coverage", "hhsubid"])
+IDS = list(cov["id"])
+
+rule all:
+    input:
+        expand ("data/within_host_consensus/align/{id}_1.sorted.bam", id=IDS),
+        expand("data/within_host_consensus/consensus/{id}.fa",id =IDS),
+        expand ("data/within_host_consensus/variants_final/{id}_1.variants.tsv", id=IDS),
+        #expand("data/within_host_consensus/primer_bed/{id}.bam", id=IDS),
+        #expand ("data/within_host_consensus/variants_final/{id}.filtered", id=IDS),
+        "all_variants_filtered"
+rule parameters:
+    params:
+        bed_file = "ncov_references/V5.3.2/SARS-CoV-2.scheme.bed",
+        reference_path  = "data/within_host_consensus/reference/", # fasta used for alignment
+        #reference_fasta= "ncov_references/bwa_ref/WH1", # bwa index used for alignment. Should be a build of reference_fasta
+        min_qual_score = 0, # minimum quality score used in iVar consensus. Important that this is zero for calling indels.
+        consensus_threshold = 0, # frequency threshold value used in iVar consensus. See documentation.
+        min_depth = 10, # minimum depth used in iVar consensus
+        cutadapt_seq_fwd = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA", # sequence used for adapter trimming. This is NEBnext (same as TruSeq). Nextera adapter sequence, forward and reverse: CTGTCTCTTATACACATCT
+        cutadapt_seq_rev = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+        primer_fasta ="ncov_references/V5.3.2/SARS-CoV-2.primer.fa",
+        variant_min_Q_score = 30, # minimum base quality for including base in mpileup
+        variant_min_mapQ = 20, # minimum mapping quality for including base in mpileup
+        variant_min_depth = 1, # minimum depth used in iVar variants
+        variant_freq_threshold = 0.005, # minimum frequency to call variants
+        primer_info = "ncov_references/V5.3.2/SARS-CoV-2.primer_pairs.tsv",
+        reference_gff = "ncov_references/WH1_ORFs.gff",
+
+
+setup = rules.parameters.params
+
+# ============================= Here are the pipeline rules =============================
+
+
+rule bwa_align:
+    message:
+        """
+        =======================================================
+        Map with BWA and sort
+        =======================================================
+        """
+    input:
+        reads_1_in = "data/fastq_renamed/{id}_A.1.fastq.gz",
+        reads_2_in = "data/fastq_renamed/{id}_A.2.fastq.gz",
+        reads_3_in = "data/fastq_renamed/{id}_B.1.fastq.gz",
+        reads_4_in = "data/fastq_renamed/{id}_B.2.fastq.gz",
+    output:
+        bam1 = "data/within_host_consensus/align/{id}_1.sorted.bam",
+        bam2 = "data/within_host_consensus/align/{id}_2.sorted.bam"
+        
+    params: 
+        sample="{id}"
+        
+    run:
+        sample = str(params.sample)
+        ref = sample[0:6]
+        ref_path = setup.reference_path + ref + ".fa"
+        shell ("bwa mem " + ref_path + " " + input.reads_1_in + " " + input.reads_2_in + " | samtools view -F 4 -Sb | samtools sort -o "+ output.bam1 +" && samtools index " + output.bam1)
+        shell ("bwa mem " + ref_path + " " + input.reads_3_in + " " + input.reads_4_in + " | samtools view -F 4 -Sb | samtools sort -o "+ output.bam2 +" && samtools index " + output.bam2)
+rule ivar_trim:
+    message:
+        """
+        =======================================================
+        Trim the ARTIC primers with iVar
+        =======================================================
+        """
+    input:
+        in1 = "data/within_host_consensus/align/{id}_1.sorted.bam",
+        in2 = "data/within_host_consensus/align/{id}_2.sorted.bam"
+    output:
+        out1 = "data/within_host_consensus/primertrim/{id}_1.sorted.primertrim.bam",
+        out2 = "data/within_host_consensus/primertrim/{id}_2.sorted.primertrim.bam"
+    shell:
+        """
+        ivar trim -i {input.in1} -b {setup.bed_file} -p {output.out1}
+        ivar trim -i {input.in2} -b {setup.bed_file} -p {output.out2}
+        """
+
+rule sort_bam:
+    message:
+        """
+        =======================================================
+        Sort the primer-trimmed file
+        =======================================================
+        """
+    input:
+        in1= "data/within_host_consensus/primertrim/{id}_1.sorted.primertrim.bam",
+        in2= "data/within_host_consensus/primertrim/{id}_2.sorted.primertrim.bam"
+
+    output:
+        bam1 = "data/within_host_consensus/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam",
+        bai1 = "data/within_host_consensus/primertrim_sorted/{id}_1.removed.primertrim.sorted.bai",
+        bam2 = "data/within_host_consensus/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam",
+        bai2 = "data/within_host_consensus/primertrim_sorted/{id}_2.removed.primertrim.sorted.bai"
+
+    shell:
+        """
+        PicardCommandLine SortSam SO=coordinate INPUT={input.in1} OUTPUT={output.bam1} VALIDATION_STRINGENCY=LENIENT CREATE_INDEX=true
+        PicardCommandLine SortSam SO=coordinate INPUT={input.in2} OUTPUT={output.bam2} VALIDATION_STRINGENCY=LENIENT CREATE_INDEX=true
+        """
+
+rule get_consensus:
+    message:
+        """
+        =======================================================
+        Get the consensus sequence with iVar
+        =======================================================
+        """
+    input:
+        bam_file1 = "data/within_host_consensus/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam",
+        bam_file2 = "data/within_host_consensus/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam"
+
+    output:
+        consensus_file = "data/within_host_consensus/consensus/{id}.fa",
+        merged_bam = "data/within_host_consensus/consensus/{id}_merged.bam"
+    
+    params:
+        sample="{id}",
+    
+    run: 
+        sample = str(params.sample)
+        ref = sample[0:6]
+        ref_path = setup.reference_path + ref + ".fa"
+        shell("samtools merge " + output.merged_bam + " " + input.bam_file1 + " " + input.bam_file2)
+        shell("samtools mpileup -a -A -d 100000 -Q 0 --reference " +  ref_path + " " + output.merged_bam + " | ivar consensus -p " + output.consensus_file + " -n N -q "+ str(setup.min_qual_score)  + " -t " + str(setup.consensus_threshold) + " -m " + str(setup.min_depth))
+
+rule bwa_build:
+    message:
+        """
+        =======================================================
+        index consensus sequence with bowtie2 build and Faidx
+        =======================================================
+        """
+    input:
+        'data/within_host_consensus/consensus/{id}.fa' 
+        
+    output:
+        'data/within_host_consensus/consensus/{id}.fa.bwt',
+
+    params:
+        'data/within_host_consensus/consensus/{id}'
+    
+    shell:
+        """
+        bwa index {input} {params}
+        samtools faidx {input}
+        """
+
+rule create_primer_bam:
+    message:
+        """
+        =======================================================
+        Create primer bam file per sample ##Check these files
+        =======================================================
+        """
+    input:
+        sample_fasta= "data/within_host_consensus/consensus/{id}.fa.bwt",
+
+    output:
+        "data/within_host_consensus/primer_bed/{id}.bam"
+    params:
+        index = "data/within_host_consensus/consensus/{id}.fa"
+    shell:
+        """
+        bwa mem -k 5 -T 16 {params.index} {setup.primer_fasta} | samtools view -bS -F 4 | samtools sort -o {output}
+        """
+
+rule create_bed:
+    message:
+        """
+        =======================================================
+        Create primer bed file per sample
+        =======================================================
+        """
+    input:
+        bam = "data/within_host_consensus/primer_bed/{id}.bam",
+
+    output:
+       bed = "data/within_host_consensus/primer_bed/{id}.bed",
+    shell:
+        """
+        bedtools bamtobed -i {input.bam} > {output.bed}
+        """
+
+rule call_variants_in_primer:
+    message:
+        """
+        =======================================================
+        Call variants in primers to get mismatches
+        =======================================================
+        """
+    input:
+        primer_bam = "data/within_host_consensus/primer_bed/{id}.bam",
+        sample_consensus = 'data/within_host_consensus/consensus/{id}.fa'   
+    output:
+        mismatch = "data/within_host_consensus/primer_mismatches/{id}.tsv",
+
+    shell:
+        """
+        samtools mpileup -aa -A -d 100000 --reference {input.sample_consensus} -Q {setup.variant_min_Q_score} -q {setup.variant_min_mapQ} -F 0 {input.primer_bam} | ivar variants -p {output.mismatch} -t {setup.variant_freq_threshold}
+        """
+
+
+# may need to modify below to account for filenames, and correct inputs
+rule mask:
+    message:
+        """
+        =======================================================
+        Mask primer segments with mismatches to consensus
+        =======================================================
+        """
+    input:
+        mismatch_tsv = "data/within_host_consensus/primer_mismatches/{id}.tsv",
+        sample_bed = "data/within_host_consensus/primer_bed/{id}.bed",
+        
+    output:
+        mask= "data/within_host_consensus/mask/{id}_masked_primer_names.txt",
+    shell:
+        """
+        ivar getmasked -i {input.mismatch_tsv} -b {input.sample_bed}  -f {setup.primer_info} -p {output.mask}
+        """
+rule remove_masked:
+    message:
+        """
+        =======================================================
+        Remove reads with mismatches to consensus
+        =======================================================
+        """
+    input:
+        bam_file_1 = "data/within_host_consensus/primertrim_sorted/{id}_1.removed.primertrim.sorted.bam",
+        bam_file_2 = "data/within_host_consensus/primertrim_sorted/{id}_2.removed.primertrim.sorted.bam",
+        mask_file = "data/within_host_consensus/mask/{id}_masked_primer_names.txt",
+    output:
+        bam_1 ="data/within_host_consensus/removed/{id}_1.masked.sorted.bam", 
+        bam_2="data/within_host_consensus/removed/{id}_2.masked.sorted.bam", 
+
+    params:
+        remove_sites_1 = "data/within_host_consensus/removed/{id}_1.masked",
+        remove_sites_2 = "data/within_host_consensus/removed/{id}_2.masked",
+        temp_1 = "data/within_host_consensus/removed/{id}_1.tmp",
+        temp_2 = "data/within_host_consensus/removed/{id}_2.tmp",
+    
+    shell:
+        """
+        ivar removereads -i {input.bam_file_1} -p {params.remove_sites_1} -t {input.mask_file} -b {setup.bed_file}  
+        samtools sort -T {params.temp_1} -o {output.bam_1} {params.remove_sites_1}.bam        
+        samtools index {output.bam_1}
+        
+        ivar removereads -i {input.bam_file_2} -p {params.remove_sites_2} -t {input.mask_file} -b {setup.bed_file}  
+        samtools sort -T {params.temp_2} -o {output.bam_2} {params.remove_sites_2}.bam        
+        samtools index {output.bam_2}
+        """
+
+rule variants_post_removal:
+    message:
+        """
+        =======================================================
+        Call variants with iVar after mismatch removal
+        =======================================================
+        """
+    input:
+        bam_1="data/within_host_consensus/removed/{id}_1.masked.sorted.bam",
+        bam_2="data/within_host_consensus/removed/{id}_2.masked.sorted.bam",
+
+    output:
+        variants_1="data/within_host_consensus/variants_final/{id}_1.variants.tsv",
+        variants_2="data/within_host_consensus/variants_final/{id}_2.variants.tsv",
+
+    params:
+        variants_1="data/within_host_consensus/variants_final/{id}_1.variants",
+        variants_2="data/within_host_consensus/variants_final/{id}_2.variants",
+        sample= "{id}"
+
+    run:
+        sample = str(params.sample)
+        print (sample)
+        ref = sample[0:6]
+        print (ref)
+        ref_path = setup.reference_path + ref + ".fa"
+        print (ref_path)
+        shell ("samtools mpileup -aa -A -d 100000 -B -Q 0 -q " + str(setup.variant_min_mapQ) + " --reference " + ref_path + " " + input.bam_1 + " | ivar variants -p "  + params.variants_1 +" -q " + str(setup.variant_min_Q_score) + " -t " + str(setup.variant_freq_threshold) + " -r " + ref_path + " -g " + setup.reference_gff)
+        shell ("samtools mpileup -aa -A -d 100000 -B -Q 0 -q " + str(setup.variant_min_mapQ) + " --reference " + ref_path + " " + input.bam_2 + " | ivar variants -p " + params.variants_2 +" -q " + str(setup.variant_min_Q_score) + " -t " + str(setup.variant_freq_threshold) + " -r " + ref_path + " -g " + setup.reference_gff)
+        
+
+rule merge_variants: 
+    message:
+        """
+        =======================================================
+        Merge duplicate sequencing run variants with iVar
+        =======================================================
+        """      
+    input:
+        variants_1="data/within_host_consensus/variants_final/{id}_1.variants.tsv",
+        variants_2="data/within_host_consensus/variants_final/{id}_2.variants.tsv",
+    output:
+        'data/within_host_consensus/variants_final/{id}.merged.tsv'
+    params: 
+        'data/within_host_consensus/variants_final/{id}.merged'
+    shell:
+        'ivar filtervariants -p  {params} {input.variants_1} {input.variants_2}'
+
+
+rule filter_variants:
+    message:
+         """
+        =======================================================
+        Filter variants in R 
+        =======================================================
+        """
+    input:
+        sample= "data/within_host_consensus/variants_final/{id}.merged.tsv",
+        masks_sites = "ncov_references/problematic_sites_v7.txt"
+    output:
+        #"data/within_host_consensus/variants_finale/{id}.100.filtered",
+        "data/within_host_consensus/variants_final/{id}.filtered"
+    script:
+        "filter_ivar_variants.R"
+
+
+rule collapse_all_variants:
+     message:
+         """
+          =======================================================
+          Collapse variants from all samples into one file
+          =======================================================
+         """
+     input:
+          input_98 = expand ("data/within_host_consensus/variants_final/{id}.filtered", id=IDS),
+         # input_100 =expand ("data/within_host_consensus/variants_final/{id}.100.filtered", id=IDS)
+        
+     output:
+          final_98 ="all_variants_filtered",
+          #final_100 = "all_variants_filtered_100"
+     shell:
+          """          
+          awk 'NR == 1 || FNR > 1'  {input.input_98}  >  {output.final_98}
+          """

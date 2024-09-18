@@ -1,0 +1,41 @@
+### Author: Emily Bendall
+### Purpose: Indexes the within-host consensus to be used as a reference
+
+# ============================= Configure run options here =============================
+
+
+REFERENCES, = glob_wildcards("data/within_host_consensus/reference/{ref}.fa")
+
+rule all:
+    input:
+        expand ("data/within_host_consensus/reference/{ref}.fa.bwt", ref=REFERENCES),
+rule parameters:
+    params:
+        primer_fasta ="ncov_references/V5.3.2/SARS-CoV-2.primer.fa",
+        bed_file = "ncov_references/V5.3.2/SARS-CoV-2.scheme.bed",
+setup = rules.parameters.params
+
+# ============================= Here are the pipeline rules =============================
+
+rule bwa_build:
+    message:
+        """
+        =======================================================
+        index consensus sequence with bwa build and Faidx
+        =======================================================
+        """
+    input:
+        'data/within_host_consensus/reference/{ref}.fa' 
+        
+    output:
+        'data/within_host_consensus/reference/{ref}.fa.bwt',
+
+    params:
+        'data/within_host_consensus/reference/{ref}'
+    
+    shell:
+        """
+        bwa index {input} {params}
+        samtools faidx {input}
+        """
+
